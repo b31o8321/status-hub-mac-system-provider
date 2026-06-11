@@ -78,6 +78,13 @@ failed.
 
 ## Status Hub Output
 
+The first executable version is included in this repository:
+
+```bash
+STATUS_HUB_STATUS_FILE=/tmp/mac-system-status.json bin/mac-system-provider --once
+cat /tmp/mac-system-status.json
+```
+
 Provider snapshot:
 
 ```json
@@ -193,4 +200,3 @@ Reasoning:
 - A Swift command-line provider avoids shipping Python dependencies.
 - The Status Hub plugin protocol remains process/file based, so the Swift CLI
   stays decoupled from the Status Hub app.
-

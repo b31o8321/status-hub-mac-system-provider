@@ -1,0 +1,16 @@
+{
+  "id": "mac-system",
+  "title": "Mac System",
+  "version": "0.1.0",
+  "providers": [
+    {
+      "id": "health",
+      "title": "Mac System Health",
+      "icon": "desktopcomputer",
+      "statusFile": "runtime/status.json",
+      "command": "bin/mac-system-provider",
+      "arguments": [],
+      "workingDirectory": "."
+    }
+  ]
+}
