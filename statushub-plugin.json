@@ -1,16 +1,113 @@
 {
   "id": "mac-system",
   "title": "Mac System",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "providers": [
     {
       "id": "health",
       "title": "Mac System Health",
       "icon": "desktopcomputer",
       "statusFile": "runtime/status.json",
+      "configFile": "runtime/config.json",
       "command": "bin/mac-system-provider",
       "arguments": [],
-      "workingDirectory": "."
+      "workingDirectory": ".",
+      "configuration": [
+        {
+          "id": "metrics",
+          "title": "指标",
+          "fields": [
+            {
+              "key": "refreshIntervalSeconds",
+              "title": "刷新间隔",
+              "type": "number",
+              "defaultValue": "3",
+              "placeholder": "3",
+              "help": "单位：秒"
+            },
+            {
+              "key": "enabledMetrics",
+              "title": "启用指标",
+              "type": "multiselect",
+              "defaultValue": "cpu,memory,network,battery,disk,temperature",
+              "options": [
+                { "value": "cpu", "title": "CPU" },
+                { "value": "memory", "title": "内存" },
+                { "value": "network", "title": "网络" },
+                { "value": "battery", "title": "电池" },
+                { "value": "disk", "title": "磁盘" },
+                { "value": "temperature", "title": "温度" }
+              ]
+            },
+            {
+              "key": "network.interface",
+              "title": "网络接口",
+              "type": "text",
+              "defaultValue": "auto",
+              "placeholder": "auto"
+            },
+            {
+              "key": "temperature.source",
+              "title": "温度来源",
+              "type": "select",
+              "defaultValue": "auto",
+              "options": [
+                { "value": "auto", "title": "自动" },
+                { "value": "iohid", "title": "IOHID" },
+                { "value": "powermetrics", "title": "powermetrics" }
+              ]
+            },
+            {
+              "key": "temperature.allowPowermetricsFallback",
+              "title": "允许 powermetrics 兜底",
+              "type": "toggle",
+              "defaultValue": "false",
+              "help": "可能需要系统授权，默认关闭"
+            }
+          ]
+        },
+        {
+          "id": "thresholds",
+          "title": "阈值",
+          "fields": [
+            {
+              "key": "thresholds.cpuAttentionPercent",
+              "title": "CPU 提醒",
+              "type": "number",
+              "defaultValue": "85",
+              "help": "百分比"
+            },
+            {
+              "key": "thresholds.memoryFreeAttentionPercent",
+              "title": "内存提醒",
+              "type": "number",
+              "defaultValue": "10",
+              "help": "低于该空闲百分比提醒"
+            },
+            {
+              "key": "thresholds.diskFreeAttentionGB",
+              "title": "磁盘提醒",
+              "type": "number",
+              "defaultValue": "10",
+              "help": "低于该可用 GB 数提醒"
+            },
+            {
+              "key": "thresholds.diskFreeAttentionPercent",
+              "title": "磁盘比例提醒",
+              "type": "number",
+              "defaultValue": "5",
+              "help": "低于该可用百分比提醒"
+            },
+            {
+              "key": "thresholds.temperatureAttentionCelsius",
+              "title": "温度提醒",
+              "type": "number",
+              "defaultValue": "85",
+              "help": "摄氏度"
+            }
+          ]
+        }
+      ]
     }
   ]
 }
