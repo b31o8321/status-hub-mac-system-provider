@@ -36,6 +36,10 @@ DEFAULT_CONFIG = {
     },
 }
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+TEMPERATURE_HELPER_SOURCE = ROOT_DIR / "src" / "MacTemperatureHelper" / "main.swift"
+TEMPERATURE_HELPER_BINARY = ROOT_DIR / ".build" / "mac-temperature-helper"
+
 SEVERITY = {
     "idle": 0,
     "unknown": 0,
@@ -372,11 +376,20 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
     allow_powermetrics = bool(temp_config.get("allowPowermetricsFallback", False))
     thermal_pressure = read_thermal_pressure()
     reading = None
+    native_reading = None
     source_used = "unavailable"
 
+    if source in {"auto", "iohid", "native"}:
+        native_reading = read_native_temperature()
+        if native_reading is not None:
+            reading = float(native_reading.get("cpuCelsius") or native_reading.get("maxCelsius"))
+            source_used = str(native_reading.get("source", "iohid"))
+
     if source in {"auto", "powermetrics"} and (source == "powermetrics" or allow_powermetrics):
-        reading = read_powermetrics_temperature()
-        source_used = "powermetrics" if reading is not None else source_used
+        powermetrics_reading = read_powermetrics_temperature()
+        if reading is None and powermetrics_reading is not None:
+            reading = powermetrics_reading
+            source_used = "powermetrics"
 
     if reading is None:
         if thermal_pressure is not None:
@@ -405,19 +418,85 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
     critical = float(thresholds.get("temperatureCriticalCelsius", 95))
     status = "attention" if reading >= attention else "success"
     label = "critical" if reading >= critical else "high" if reading >= attention else "normal"
+    max_celsius = float(native_reading.get("maxCelsius")) if native_reading is not None else reading
+    sensor_count = int(native_reading.get("sensorCount", 0)) if native_reading is not None else 0
+    subtitle = f"CPU {reading:.0f} C · max {max_celsius:.0f} C · {label} · {source_used}"
+    detail = {
+        "source": source_used,
+        "cpuCelsius": f"{reading:.1f}",
+        "maxCelsius": f"{max_celsius:.1f}",
+        "sensorCount": str(sensor_count) if sensor_count else "unknown",
+        "attentionCelsius": f"{attention:.1f}",
+        "criticalCelsius": f"{critical:.1f}",
+    }
+    if native_reading is not None:
+        sensors = native_reading.get("sensors") or []
+        if sensors:
+            detail["topSensors"] = ", ".join(
+                f"{sensor.get('name', 'sensor')} {float(sensor.get('celsius', 0)):.0f} C"
+                for sensor in sensors[:5]
+            )
     return {
         "id": "temperature",
-        "title": "Thermal",
-        "subtitle": f"{reading:.0f} C · {label} · {source_used}",
+        "title": "Temperature",
+        "subtitle": subtitle,
         "status": status,
         "value": f"{reading:.0f} C",
-        "detail": {
-            "source": source_used,
-            "celsius": f"{reading:.1f}",
-            "attentionCelsius": f"{attention:.1f}",
-            "criticalCelsius": f"{critical:.1f}",
-        },
+        "detail": detail,
     }
+
+
+def read_native_temperature() -> dict | None:
+    helper = ensure_temperature_helper()
+    if helper is None:
+        return None
+    output = run([str(helper)], timeout=5, check=False)
+    if not output.strip():
+        return None
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    max_celsius = data.get("maxCelsius")
+    if not isinstance(max_celsius, (int, float)) or not 0 < float(max_celsius) < 130:
+        return None
+    cpu_celsius = data.get("cpuCelsius")
+    if cpu_celsius is not None and not isinstance(cpu_celsius, (int, float)):
+        data["cpuCelsius"] = None
+    return data
+
+
+def ensure_temperature_helper() -> Path | None:
+    if (
+        TEMPERATURE_HELPER_BINARY.exists()
+        and TEMPERATURE_HELPER_SOURCE.exists()
+        and TEMPERATURE_HELPER_BINARY.stat().st_mtime >= TEMPERATURE_HELPER_SOURCE.stat().st_mtime
+    ):
+        return TEMPERATURE_HELPER_BINARY
+    swiftc = shutil.which("swiftc")
+    if not swiftc or not TEMPERATURE_HELPER_SOURCE.exists():
+        return None
+    TEMPERATURE_HELPER_BINARY.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            swiftc,
+            str(TEMPERATURE_HELPER_SOURCE),
+            "-framework",
+            "IOKit",
+            "-framework",
+            "CoreFoundation",
+            "-o",
+            str(TEMPERATURE_HELPER_BINARY),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return TEMPERATURE_HELPER_BINARY
 
 
 def read_thermal_pressure() -> dict | None:
@@ -440,7 +519,7 @@ def read_thermal_pressure() -> dict | None:
         "detail": {
             "source": "pmset therm",
             "raw": normalized[:180],
-            "cpuTemperature": "requires native helper",
+            "cpuTemperature": "native helper unavailable",
         },
     }
 

@@ -23,28 +23,27 @@ Temperature is part of the first core version, not a later enhancement.
 | Network | active interface, upload/download rate | `attention` when selected interface is disconnected |
 | Battery / Energy | battery percent, charging state, low-power mode, thermal state | `attention` on low battery or serious thermal state |
 | Disk | macOS user-visible Macintosh HD usage | `attention` when free space is below percent or absolute threshold |
-| Thermal | thermal pressure state, optional temperature if available | `attention` when macOS reports thermal or performance warning |
+| Temperature | CPU/package temperature, max sensor temperature, thermal pressure fallback | `attention` when temperature crosses threshold or macOS reports thermal warning |
 
 ## Temperature Strategy
 
-Temperature support must be explicit because macOS exposes it differently across
-Intel, Apple Silicon, OS versions, and permission contexts. The first provider
-version reports macOS thermal pressure through `pmset -g therm`. CPU/package
-temperature requires a native SMC/IOKit helper on Apple Silicon and is not
-reported by the Python stdlib collector.
+Temperature support is explicit because macOS exposes it differently across
+Intel, Apple Silicon, OS versions, and permission contexts. The provider reads
+Apple Silicon temperature sensors through a native IOHID helper. If the helper
+cannot run, the provider falls back to macOS thermal pressure from
+`pmset -g therm`.
 
 Collection priority:
 
-1. **Thermal pressure**: current supported path, based on `pmset -g therm`.
-   This reports whether the system has recorded thermal or performance warnings.
-2. **SMC / IOKit sensor read**: preferred future path for regular temperature
-   readings.
-   It should not require sudo. The implementation should read known temperature
-   keys and report the best available CPU/package value plus the max sensor.
-3. **`powermetrics` fallback**: optional path when SMC access is unavailable.
+1. **IOHID sensor read**: default path for regular temperature readings. It
+   does not require sudo and reports the best CPU/package estimate plus max
+   sensor temperature.
+2. **`powermetrics` fallback**: optional path when IOHID access is unavailable.
    This may require elevated privileges and should not block the provider. If it
    is not permitted, report temperature as unavailable instead of failing the
    whole provider.
+3. **Thermal pressure**: fallback based on `pmset -g therm`. This reports
+   whether the system has recorded thermal or performance warnings.
 4. **Unsupported state**: emit the temperature item with `unknown` status and a
    clear subtitle, while the rest of the system metrics continue to work.
 
@@ -54,11 +53,11 @@ Temperature item requirements:
 {
   "id": "temperature",
   "title": "Temperature",
-  "subtitle": "CPU 61 C · max 64 C · SMC",
+  "subtitle": "CPU 61 C · max 64 C · normal · iohid",
   "status": "success",
   "value": "61 C",
   "detail": {
-    "source": "smc",
+    "source": "iohid",
     "cpuCelsius": "61",
     "maxCelsius": "64"
   }
@@ -109,7 +108,7 @@ Provider snapshot:
     {
       "id": "temperature",
       "title": "Temperature",
-      "subtitle": "CPU 61 C · max 64 C · SMC",
+      "subtitle": "CPU 61 C · max 64 C · normal · iohid",
       "status": "success",
       "value": "61 C"
     }
@@ -157,8 +156,8 @@ Default config:
 
 Temperature config:
 
-- `source=auto`: try SMC first, then allowed fallbacks.
-- `source=smc`: only use SMC/IOKit.
+- `source=auto`: try IOHID first, then allowed fallbacks.
+- `source=iohid` or `source=native`: only use the native IOHID helper.
 - `source=powermetrics`: use `powermetrics` only if the user explicitly enables
   it and permissions allow it.
 - `allowPowermetricsFallback=false` by default, because the provider should not
@@ -208,6 +207,8 @@ Reasoning:
 
 - CPU, memory, network, battery, disk, thermal state, and SMC/IOKit are native
   macOS APIs.
-- A Swift command-line provider avoids shipping Python dependencies.
+- A small Swift helper reads IOHID temperature events without sudo. The current
+  provider keeps Python for the status-file orchestration and compiles the
+  helper on first run with `swiftc`.
 - The Status Hub plugin protocol remains process/file based, so the Swift CLI
   stays decoupled from the Status Hub app.
