@@ -19,27 +19,33 @@ Temperature is part of the first core version, not a later enhancement.
 | Metric | First version data | Status rule |
 | --- | --- | --- |
 | CPU | total usage, load average | `attention` when sustained usage exceeds threshold |
-| Memory | used percent, available memory, swap | `attention` when pressure or swap exceeds threshold |
+| Memory | memory pressure, pressure free percent, compressed memory | `attention` when memory pressure free percent is below threshold |
 | Network | active interface, upload/download rate | `attention` when selected interface is disconnected |
 | Battery / Energy | battery percent, charging state, low-power mode, thermal state | `attention` on low battery or serious thermal state |
-| Disk | main volume used/free space | `attention` when free space is below threshold |
-| Temperature | CPU/package temperature if available, max sensor temperature, source used | `attention` when temperature exceeds threshold, `unknown` when unsupported |
+| Disk | macOS user-visible Macintosh HD usage | `attention` when free space is below percent or absolute threshold |
+| Thermal | thermal pressure state, optional temperature if available | `attention` when macOS reports thermal or performance warning |
 
 ## Temperature Strategy
 
 Temperature support must be explicit because macOS exposes it differently across
-Intel, Apple Silicon, OS versions, and permission contexts.
+Intel, Apple Silicon, OS versions, and permission contexts. The first provider
+version reports macOS thermal pressure through `pmset -g therm`. CPU/package
+temperature requires a native SMC/IOKit helper on Apple Silicon and is not
+reported by the Python stdlib collector.
 
 Collection priority:
 
-1. **SMC / IOKit sensor read**: preferred path for regular provider operation.
+1. **Thermal pressure**: current supported path, based on `pmset -g therm`.
+   This reports whether the system has recorded thermal or performance warnings.
+2. **SMC / IOKit sensor read**: preferred future path for regular temperature
+   readings.
    It should not require sudo. The implementation should read known temperature
    keys and report the best available CPU/package value plus the max sensor.
-2. **`powermetrics` fallback**: optional path when SMC access is unavailable.
+3. **`powermetrics` fallback**: optional path when SMC access is unavailable.
    This may require elevated privileges and should not block the provider. If it
    is not permitted, report temperature as unavailable instead of failing the
    whole provider.
-3. **Unsupported state**: emit the temperature item with `unknown` status and a
+4. **Unsupported state**: emit the temperature item with `unknown` status and a
    clear subtitle, while the rest of the system metrics continue to work.
 
 Temperature item requirements:
@@ -132,7 +138,9 @@ Default config:
   "thresholds": {
     "cpuAttentionPercent": 85,
     "memoryAttentionPercent": 85,
-    "diskFreeAttentionPercent": 10,
+    "memoryFreeAttentionPercent": 10,
+    "diskFreeAttentionPercent": 5,
+    "diskFreeAttentionGB": 10,
     "batteryLowPercent": 20,
     "temperatureAttentionCelsius": 85,
     "temperatureCriticalCelsius": 95
@@ -158,13 +166,16 @@ Temperature config:
 
 ## Status Mapping
 
-Overall provider status is the highest-severity status from enabled metrics:
+Overall provider status is the highest-severity actionable status from enabled
+metrics. Optional unsupported metrics such as temperature may remain `unknown`
+without making the whole provider unknown when the rest of the metrics are
+healthy:
 
 1. `failed`: provider cannot collect essential metrics or config is invalid.
 2. `attention`: at least one enabled metric crosses an attention threshold.
 3. `running`: reserved for long-running maintenance actions, normally unused.
-4. `unknown`: optional metric unavailable and no higher status exists.
-5. `success`: all enabled metrics are healthy.
+4. `success`: at least one enabled metric is healthy and no actionable issue exists.
+5. `unknown`: all enabled metrics are unavailable.
 6. `idle`: provider has not collected a sample yet.
 
 Temperature-specific mapping:

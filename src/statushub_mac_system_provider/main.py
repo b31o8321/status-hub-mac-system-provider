@@ -7,6 +7,7 @@ from pathlib import Path
 import argparse
 import json
 import os
+import plistlib
 import re
 import shutil
 import signal
@@ -21,7 +22,9 @@ DEFAULT_CONFIG = {
     "thresholds": {
         "cpuAttentionPercent": 85,
         "memoryAttentionPercent": 85,
-        "diskFreeAttentionPercent": 10,
+        "memoryFreeAttentionPercent": 10,
+        "diskFreeAttentionPercent": 5,
+        "diskFreeAttentionGB": 10,
         "batteryLowPercent": 20,
         "temperatureAttentionCelsius": 85,
         "temperatureCriticalCelsius": 95,
@@ -35,8 +38,8 @@ DEFAULT_CONFIG = {
 
 SEVERITY = {
     "idle": 0,
+    "unknown": 0,
     "success": 1,
-    "unknown": 2,
     "running": 3,
     "attention": 4,
     "failed": 5,
@@ -186,20 +189,37 @@ def collect_memory(_config: dict, thresholds: dict, _state: CollectorState) -> d
     compressed_pages = values.get("Pages occupied by compressor", 0)
     used = max(0, total - free_pages * page_size)
     used_percent = used / total * 100 if total else 0
-    status = "attention" if used_percent >= float(thresholds.get("memoryAttentionPercent", 85)) else "success"
+    pressure_free_percent = read_memory_pressure_free_percent()
+    attention_free = float(thresholds.get("memoryFreeAttentionPercent", 10))
+    attention_used = float(thresholds.get("memoryAttentionPercent", 85))
+    if pressure_free_percent is not None:
+        status = "attention" if pressure_free_percent <= attention_free else "success"
+        value = f"{pressure_free_percent:.0f}% free"
+        subtitle = f"pressure ok · {pressure_free_percent:.0f}% free · {format_bytes(compressed_pages * page_size)} compressed"
+    else:
+        status = "attention" if used_percent >= attention_used else "success"
+        value = f"{used_percent:.0f}%"
+        subtitle = f"{used_percent:.0f}% used · {format_bytes(free_pages * page_size)} free"
     return {
         "id": "memory",
         "title": "Memory",
-        "subtitle": f"{used_percent:.0f}% used · {format_bytes(free_pages * page_size)} free",
+        "subtitle": subtitle,
         "status": status,
-        "value": f"{used_percent:.0f}%",
+        "value": value,
         "detail": {
             "total": format_bytes(total),
             "used": format_bytes(used),
             "free": format_bytes(free_pages * page_size),
             "compressed": format_bytes(compressed_pages * page_size),
+            "pressureFreePercent": f"{pressure_free_percent:.0f}" if pressure_free_percent is not None else "unknown",
         },
     }
+
+
+def read_memory_pressure_free_percent() -> float | None:
+    output = run(["/usr/bin/memory_pressure"], timeout=5)
+    match = re.search(r"System-wide memory free percentage:\s+([\d.]+)%", output)
+    return float(match.group(1)) if match else None
 
 
 def collect_network(config: dict, _thresholds: dict, state: CollectorState) -> dict:
@@ -280,21 +300,69 @@ def collect_battery(_config: dict, thresholds: dict, _state: CollectorState) -> 
 
 
 def collect_disk(_config: dict, thresholds: dict, _state: CollectorState) -> dict:
-    usage = shutil.disk_usage("/")
-    used_percent = usage.used / usage.total * 100 if usage.total else 0
-    free_percent = usage.free / usage.total * 100 if usage.total else 0
-    status = "attention" if free_percent <= float(thresholds.get("diskFreeAttentionPercent", 10)) else "success"
+    usage = read_user_visible_storage_usage()
+    if usage is None:
+        raw = shutil.disk_usage("/System/Volumes/Data" if Path("/System/Volumes/Data").exists() else "/")
+        usage = {
+            "total": raw.total,
+            "used": raw.used,
+            "available": raw.free,
+            "containerFree": raw.free,
+            "volume": "Data volume",
+        }
+    used_percent = usage["used"] / usage["total"] * 100 if usage["total"] else 0
+    free_percent = usage["available"] / usage["total"] * 100 if usage["total"] else 0
+    free_attention_percent = float(thresholds.get("diskFreeAttentionPercent", 5))
+    free_attention_bytes = float(thresholds.get("diskFreeAttentionGB", 10)) * 1024 * 1024 * 1024
+    status = "attention" if free_percent <= free_attention_percent or usage["available"] <= free_attention_bytes else "success"
     return {
         "id": "disk",
         "title": "Disk",
-        "subtitle": f"{used_percent:.0f}% used · {format_bytes(usage.free)} free",
+        "subtitle": f"{usage['volume']} · {format_storage_bytes(usage['used'])} used of {format_storage_bytes(usage['total'])}",
         "status": status,
         "value": f"{used_percent:.0f}%",
         "detail": {
-            "total": format_bytes(usage.total),
-            "used": format_bytes(usage.used),
-            "free": format_bytes(usage.free),
+            "volume": usage["volume"],
+            "total": format_storage_bytes(usage["total"]),
+            "userVisibleUsed": format_storage_bytes(usage["used"]),
+            "userVisibleAvailable": format_storage_bytes(usage["available"]),
+            "containerFree": format_storage_bytes(usage["containerFree"]),
         },
+    }
+
+
+def read_user_visible_storage_usage() -> dict | None:
+    output = run(["/usr/sbin/diskutil", "apfs", "list", "-plist"], timeout=8)
+    if not output:
+        return None
+    try:
+        data = plistlib.loads(output.encode("utf-8"))
+    except Exception:
+        return None
+
+    containers = data.get("Containers", [])
+    if not containers:
+        return None
+    container = max(containers, key=lambda item: int(item.get("CapacityCeiling", 0)))
+    total = int(container.get("CapacityCeiling", 0))
+    container_free = int(container.get("CapacityFree", 0))
+    if total <= 0:
+        return None
+
+    included_roles = {"Data", "System", "Recovery"}
+    used = 0
+    for volume in container.get("Volumes", []):
+        roles = set(volume.get("Roles", []))
+        if roles & included_roles:
+            used += int(volume.get("CapacityInUse", 0))
+    if used <= 0:
+        return None
+    return {
+        "total": total,
+        "used": used,
+        "available": max(0, total - used),
+        "containerFree": container_free,
+        "volume": "Macintosh HD",
     }
 
 
@@ -302,6 +370,7 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
     temp_config = config.get("temperature", {})
     source = temp_config.get("source", "auto")
     allow_powermetrics = bool(temp_config.get("allowPowermetricsFallback", False))
+    thermal_pressure = read_thermal_pressure()
     reading = None
     source_used = "unavailable"
 
@@ -310,15 +379,25 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
         source_used = "powermetrics" if reading is not None else source_used
 
     if reading is None:
+        if thermal_pressure is not None:
+            thermal_status = "attention" if thermal_pressure["warning"] else "success"
+            return {
+                "id": "temperature",
+                "title": "Thermal",
+                "subtitle": thermal_pressure["summary"],
+                "status": thermal_status,
+                "value": thermal_pressure["value"],
+                "detail": thermal_pressure["detail"],
+            }
         return {
             "id": "temperature",
-            "title": "Temperature",
-            "subtitle": "temperature sensors unavailable without an enabled collector",
+            "title": "Thermal",
+            "subtitle": "thermal state unavailable without a native sensor collector",
             "status": "unknown",
             "value": "--",
             "detail": {
                 "source": source_used,
-                "hint": "enable powermetrics fallback in provider config if supported",
+                "hint": "CPU temperature needs a native SMC/IOKit helper on Apple Silicon",
             },
         }
 
@@ -328,7 +407,7 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
     label = "critical" if reading >= critical else "high" if reading >= attention else "normal"
     return {
         "id": "temperature",
-        "title": "Temperature",
+        "title": "Thermal",
         "subtitle": f"{reading:.0f} C · {label} · {source_used}",
         "status": status,
         "value": f"{reading:.0f} C",
@@ -337,6 +416,31 @@ def collect_temperature(config: dict, thresholds: dict, _state: CollectorState) 
             "celsius": f"{reading:.1f}",
             "attentionCelsius": f"{attention:.1f}",
             "criticalCelsius": f"{critical:.1f}",
+        },
+    }
+
+
+def read_thermal_pressure() -> dict | None:
+    output = run(["/usr/bin/pmset", "-g", "therm"], timeout=5, check=False)
+    if not output.strip():
+        return None
+    normalized = " ".join(output.split())
+    has_warning = "warning" in normalized.lower() and "no thermal warning" not in normalized.lower()
+    has_performance_warning = (
+        "performance warning" in normalized.lower()
+        and "no performance warning" not in normalized.lower()
+    )
+    warning = has_warning or has_performance_warning
+    value = "warning" if warning else "ok"
+    summary = "thermal warning" if warning else "thermal ok"
+    return {
+        "value": value,
+        "summary": summary,
+        "warning": warning,
+        "detail": {
+            "source": "pmset therm",
+            "raw": normalized[:180],
+            "cpuTemperature": "requires native helper",
         },
     }
 
@@ -412,6 +516,20 @@ def format_bytes(value: float) -> str:
     return f"{size:.1f} TB"
 
 
+def format_storage_bytes(value: float) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(value)
+    for unit in units:
+        if abs(size) < 1000 or unit == units[-1]:
+            if unit == "B":
+                return f"{size:.0f} {unit}"
+            if size >= 100:
+                return f"{size:.0f} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1000
+    return f"{size:.1f} TB"
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -426,4 +544,3 @@ def write_json(path: Path, payload: dict) -> None:
         handle.write("\n")
         tmp_path = Path(handle.name)
     tmp_path.replace(path)
-
